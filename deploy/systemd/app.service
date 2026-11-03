@@ -1,0 +1,51 @@
+# /etc/systemd/system/app.service  (Spec 7.1)
+[Unit]
+Description=B2B Quote Market (Spring Boot)
+After=network-online.target mariadb.service
+Wants=network-online.target
+Requires=mariadb.service
+
+[Service]
+Type=simple
+User=app
+Group=app
+WorkingDirectory=/opt/app
+# 비밀값: root:app 640. 앱 계정은 읽기만 가능
+EnvironmentFile=/etc/app/secrets.env
+Environment=SPRING_PROFILES_ACTIVE=prod
+Environment=TZ=Asia/Seoul
+ExecStart=/usr/bin/java -Xms512m -Xmx2g -XX:+ExitOnOutOfMemoryError \
+    -Dfile.encoding=UTF-8 \
+    -jar /opt/app/current.jar
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=40
+UMask=0027
+
+# --- 샌드박스 ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/log/app /var/lib/app/uploads
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+# JIT 때문에 MemoryDenyWriteExecute 는 켜지 않는다
+
+[Install]
+WantedBy=multi-user.target

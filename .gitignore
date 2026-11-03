@@ -1,0 +1,29 @@
+# build
+.gradle/
+/build/
+/out/
+/bin/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# 비밀값 (Spec 8: .env, secrets.* 는 커밋 금지)
+.env
+.env.*
+!.env.example
+secrets.*
+!secrets.env.example
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+id_ecdsa*
+*.p12
+*.jks
+
+# logs / runtime
+*.log
+logs/
+uploads/

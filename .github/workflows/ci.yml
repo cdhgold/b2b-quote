@@ -1,0 +1,153 @@
+# CI / CD (Spec 7.7, 8)
+#  PR(main, develop)  : 빌드·테스트 → 정적분석 → 의존성 취약점 → 비밀값 스캔
+#  push main          : 위 검사 통과 시 JAR + SHA-256 산출 → production 환경으로 배포
+# 서드파티 액션은 태그가 아닌 커밋 SHA 로 고정한다 (Dependabot 이 갱신).
+name: ci
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+  schedule:
+    - cron: "0 0 * * 1"   # 매주 월 09:00 KST: 새 CVE 확인용 정기 실행
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: 빌드·테스트·정적분석
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1 (wrapper 검증 포함)
+      # build = 컴파일(-Werror) + 단위/Testcontainers 통합 테스트 + SpotBugs(FindSecBugs) + 보안 린트(${}, th:utext)
+      - name: Build
+        run: ./gradlew build --no-daemon
+      - name: Upload reports
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-reports
+          path: build/reports/
+          retention-days: 7
+      - name: Checksum
+        if: github.event_name == 'push'
+        working-directory: build/libs
+        run: |
+          sha256sum b2b-quote-market.jar | tee b2b-quote-market.jar.sha256
+          echo "### JAR SHA-256" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$(cut -d' ' -f1 b2b-quote-market.jar.sha256)\`" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload JAR
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: app-jar
+          path: |
+            build/libs/b2b-quote-market.jar
+            build/libs/b2b-quote-market.jar.sha256
+          retention-days: 30
+          if-no-files-found: error
+
+  dependency-check:
+    name: 의존성 취약점 (CVSS ≥ 7 실패)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+      - name: Restore NVD data
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.gradle/dependency-check-data
+          key: nvd-${{ github.run_id }}
+          restore-keys: nvd-
+      - name: OWASP Dependency-Check
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          if [ -z "$NVD_API_KEY" ]; then
+            echo "::error::NVD_API_KEY 시크릿이 없습니다. https://nvd.nist.gov/developers/request-an-api-key 에서 발급 후 저장소 시크릿에 등록하세요."
+            exit 1
+          fi
+          ./gradlew dependencyCheckAnalyze --no-daemon
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dependency-check-report
+          path: build/reports/dependency-check-report.*
+          retention-days: 14
+          if-no-files-found: ignore
+
+  gitleaks:
+    name: 비밀값 스캔
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks (checksum 검증)
+        run: |
+          f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSLo "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$f"
+          echo "${GITLEAKS_SHA256}  $f" | sha256sum -c -
+          tar -xzf "$f" gitleaks
+      - name: Scan full history
+        run: ./gitleaks git --redact --no-banner --config .gitleaks.toml --exit-code 1 .
+
+  deploy:
+    name: 운영 배포
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build, dependency-check, gitleaks]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Settings > Environments > production 에 "Required reviewers" 를 걸어 수동 승인 후 배포하도록 권장
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: app-jar
+      - name: Verify checksum
+        run: sha256sum -c b2b-quote-market.jar.sha256
+      - name: Deploy over restricted SSH key
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
+          sha=$(cut -d' ' -f1 b2b-quote-market.jar.sha256)
+          # 서버 authorized_keys 의 command= 가 "deploy <sha256>" 형식만 받아들인다.
+          # JAR 은 stdin 으로 전달되고, 서버가 체크섬을 다시 검증한다.
+          ssh -i ~/.ssh/deploy_key -p "${DEPLOY_PORT}" \
+              -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o BatchMode=yes \
+              "deploy@${DEPLOY_HOST}" "deploy ${sha} ${GITHUB_SHA::12}" < b2b-quote-market.jar
+      - name: Cleanup key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# 커밋 전 비밀값 스캔 (Spec 8). 설치: git config core.hooksPath .githooks
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "[pre-commit] gitleaks 가 설치되어 있지 않습니다: https://github.com/gitleaks/gitleaks#installing" >&2
+  exit 1
+fi
+exec gitleaks git --staged --redact --no-banner --config .gitleaks.toml

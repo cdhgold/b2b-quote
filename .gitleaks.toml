@@ -1,0 +1,11 @@
+# gitleaks 기본 규칙 + 프로젝트 예외
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "로컬 개발용 더미 값과 예시 파일"
+paths = [
+  '''src/main/resources/application-local\.yml''',
+  '''compose\.yaml''',
+  '''deploy/.*\.example$''',
+]

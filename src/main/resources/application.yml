@@ -1,0 +1,75 @@
+# 공통 설정. 비밀값은 절대 넣지 않는다 (prod 값은 서버의 /etc/app/secrets.env 로 주입).
+spring:
+  application:
+    name: b2b-quote-market
+  profiles:
+    default: local
+  datasource:
+    hikari:
+      maximum-pool-size: 20
+  flyway:
+    locations: classpath:db/migration
+    validate-on-migrate: true
+    clean-disabled: true
+  session:
+    store-type: jdbc   # Spring Session JDBC (Spec 6.2)
+    jdbc:
+      initialize-schema: never   # 세션 테이블은 Flyway V1 이 만든다
+      cleanup-cron: "0 * * * * *"
+  thymeleaf:
+    cache: true
+  servlet:
+    multipart:
+      max-file-size: 20MB
+      max-request-size: 25MB
+  jackson:
+    time-zone: Asia/Seoul
+
+mybatis:
+  mapper-locations: classpath:mapper/**/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+    default-statement-timeout: 30
+
+server:
+  port: 8080
+  shutdown: graceful
+  servlet:
+    session:
+      timeout: 30m   # 유휴 30분 (절대 12시간 만료는 M1 에서 구현)
+      cookie:
+        name: SID
+        http-only: true
+        secure: true
+        same-site: lax
+      tracking-modes: cookie
+  error:
+    whitelabel:
+      enabled: false
+    include-stacktrace: never
+    include-message: never
+    include-binding-errors: never
+    include-exception: false
+
+# Actuator: 관리 포트는 localhost 에만 바인딩, health 만 노출 (Spec 6.3 A05, 7.6)
+management:
+  server:
+    port: 8081
+    address: 127.0.0.1
+  endpoints:
+    access:
+      default: none
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      access: read-only
+      show-details: never
+  info:
+    env:
+      enabled: false
+
+logging:
+  level:
+    root: INFO

@@ -1,0 +1,17 @@
+# 배포 스크립트가 "prod,migrate" 프로파일로 실행하는 1회성 마이그레이션 모드.
+# 웹 서버를 띄우지 않고 Flyway 만 수행한 뒤 종료한다. DDL 은 마이그레이션 전용 계정으로 수행.
+spring:
+  main:
+    web-application-type: none
+    banner-mode: off
+  flyway:
+    enabled: true
+    user: ${DB_MIGRATION_USERNAME}
+    password: ${DB_MIGRATION_PASSWORD}
+  session:
+    jdbc:
+      cleanup-cron: "-"
+
+logging:
+  file:
+    path: ""

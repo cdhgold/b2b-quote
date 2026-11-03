@@ -1,0 +1,157 @@
+#!/bin/bash
+# /usr/local/sbin/app-deploy  (owner root, 700) — Spec 7.7
+#   app-deploy deploy <sha256> <git-rev>
+#   app-deploy rollback
+#   app-deploy status
+#
+# 순서: 체크섬 재검증 → 릴리스 보관 → Flyway 마이그레이션(전용 계정) → 심볼릭 링크 교체
+#       → systemctl restart app → 헬스체크 실패 시 직전 JAR 로 자동 롤백
+#
+# 주의: JAR 롤백은 DB 스키마를 되돌리지 않는다. 마이그레이션은 항상 이전 버전 앱과
+#       호환되게(컬럼 추가 → 코드 전환 → 다음 릴리스에서 삭제) 작성한다.
+set -euo pipefail
+umask 027
+
+APP_DIR=/opt/app
+RELEASES="$APP_DIR/releases"
+INCOMING=/var/lib/app/incoming
+SECRETS=/etc/app/secrets.env
+HEALTH_URL=http://127.0.0.1:8081/actuator/health
+HEALTH_TIMEOUT=120
+KEEP_RELEASES=5
+
+log() { echo "[app-deploy] $*"; logger -t app-deploy -- "$*" || true; }
+die() { log "ERROR: $*"; exit 1; }
+
+exec 9>/run/app-deploy.lock
+flock -n 9 || die "다른 배포가 진행 중입니다"
+
+health_ok() {
+    local deadline=$((SECONDS + HEALTH_TIMEOUT))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if curl -fsS --max-time 3 "$HEALTH_URL" 2>/dev/null | grep -q '"status":"UP"'; then
+            return 0
+        fi
+        sleep 3
+    done
+    return 1
+}
+
+switch_link() {   # 원자적 심볼릭 링크 교체
+    local target="$1" link="$2"
+    ln -sfn "$target" "$link.tmp"
+    mv -Tf "$link.tmp" "$link"
+}
+
+do_rollback() {
+    local prev cur
+    prev="$(readlink -f "$APP_DIR/previous.jar" 2>/dev/null || true)"
+    [ -n "$prev" ] && [ -f "$prev" ] || die "롤백할 직전 릴리스가 없습니다"
+    cur="$(readlink -f "$APP_DIR/current.jar" 2>/dev/null || true)"
+    log "rollback: $(basename "${cur:-none}") -> $(basename "$prev")"
+    switch_link "$prev" "$APP_DIR/current.jar"
+    if [ -n "$cur" ] && [ -f "$cur" ]; then
+        switch_link "$cur" "$APP_DIR/previous.jar"
+    fi
+    systemctl restart app
+    if health_ok; then
+        log "rollback 완료: $(basename "$prev")"
+    else
+        die "rollback 후에도 헬스체크 실패 — 수동 점검 필요 (journalctl -u app)"
+    fi
+}
+
+prune_releases() {
+    local cur prev f
+    cur="$(readlink -f "$APP_DIR/current.jar" 2>/dev/null || true)"
+    prev="$(readlink -f "$APP_DIR/previous.jar" 2>/dev/null || true)"
+    # shellcheck disable=SC2012
+    { ls -1t "$RELEASES"/*.jar 2>/dev/null || true; } | tail -n +$((KEEP_RELEASES + 1)) | while read -r f; do
+        if [ "$f" != "$cur" ] && [ "$f" != "$prev" ]; then
+            rm -f -- "$f" "$f.sha256"
+        fi
+    done
+    # 실패 릴리스는 원인 분석용으로 최근 3개만 보관
+    # shellcheck disable=SC2012
+    { ls -1t "$RELEASES"/*.jar.failed 2>/dev/null || true; } | tail -n +4 | while read -r f; do
+        rm -f -- "$f" "${f%.failed}.sha256"
+    done
+}
+
+do_deploy() {
+    local sha="$1" rev="$2" src dest actual prev
+    [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || die "잘못된 체크섬 형식"
+    [[ "$rev" =~ ^[0-9a-f]{7,40}$ ]] || die "잘못된 리비전 형식"
+
+    src="$INCOMING/$sha.jar"
+    [ -f "$src" ] || die "업로드된 JAR 이 없습니다: $src"
+    actual="$(sha256sum "$src" | cut -d' ' -f1)"
+    if [ "$actual" != "$sha" ]; then
+        rm -f -- "$src"
+        die "체크섬 불일치 (expected=$sha actual=$actual)"
+    fi
+
+    dest="$RELEASES/$(date +%Y%m%d-%H%M%S)-$rev.jar"
+    install -o root -g app -m 0640 "$src" "$dest"
+    rm -f -- "$src"
+    [ "$(sha256sum "$dest" | cut -d' ' -f1)" = "$sha" ] || die "복사 후 체크섬 불일치"
+    echo "$sha" > "$dest.sha256"
+    log "release 저장: $(basename "$dest") sha256=$sha"
+
+    log "Flyway 마이그레이션 실행 (migration 계정)"
+    if ! systemd-run --quiet --wait --pipe --collect \
+            --uid=app --gid=app \
+            -p EnvironmentFile="$SECRETS" \
+            -E SPRING_PROFILES_ACTIVE=prod,migrate -E TZ=Asia/Seoul \
+            /usr/bin/java -Xmx512m -jar "$dest"; then
+        rm -f -- "$dest" "$dest.sha256"
+        die "마이그레이션 실패 — 현재 버전 유지, 재시작하지 않음"
+    fi
+
+    local old_prev
+    prev="$(readlink -f "$APP_DIR/current.jar" 2>/dev/null || true)"
+    old_prev="$(readlink -f "$APP_DIR/previous.jar" 2>/dev/null || true)"
+    switch_link "$dest" "$APP_DIR/current.jar"
+    if [ -n "$prev" ] && [ -f "$prev" ]; then
+        switch_link "$prev" "$APP_DIR/previous.jar"
+    fi
+
+    log "app 재시작"
+    systemctl restart app
+    if health_ok; then
+        log "배포 성공: $(basename "$dest")"
+        prune_releases
+        return 0
+    fi
+
+    log "헬스체크 실패 — 직전 릴리스로 자동 롤백"
+    journalctl -u app -n 50 --no-pager || true
+    [ -n "$prev" ] && [ -f "$prev" ] || die "직전 릴리스가 없어 롤백할 수 없습니다"
+    # 실패한 릴리스는 current/previous 어디에도 남기지 않는다 (수동 rollback 시 재선택 방지)
+    switch_link "$prev" "$APP_DIR/current.jar"
+    if [ -n "$old_prev" ] && [ -f "$old_prev" ]; then
+        switch_link "$old_prev" "$APP_DIR/previous.jar"
+    else
+        rm -f "$APP_DIR/previous.jar"
+    fi
+    mv -f -- "$dest" "$dest.failed"
+    systemctl restart app
+    if health_ok; then
+        die "배포 실패, 롤백 완료: $(basename "$prev") 로 복귀 (실패 JAR: $(basename "$dest").failed)"
+    fi
+    die "롤백 후에도 헬스체크 실패 — 수동 점검 필요 (journalctl -u app)"
+}
+
+do_status() {
+    echo "current : $(readlink -f "$APP_DIR/current.jar" 2>/dev/null || echo '-')"
+    echo "previous: $(readlink -f "$APP_DIR/previous.jar" 2>/dev/null || echo '-')"
+    echo "service : $(systemctl is-active app || true)"
+    echo "health  : $(curl -fsS --max-time 3 "$HEALTH_URL" 2>/dev/null || echo 'DOWN')"
+}
+
+case "${1:-}" in
+    deploy)   [ $# -eq 3 ] || die "usage: app-deploy deploy <sha256> <git-rev>"; do_deploy "$2" "$3" ;;
+    rollback) do_rollback ;;
+    status)   do_status ;;
+    *)        die "usage: app-deploy {deploy <sha256> <rev>|rollback|status}" ;;
+esac

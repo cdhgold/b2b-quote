@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html lang="ko" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{layout :: head('오류')}"></head>
+<body>
+<main class="container">
+    <h1 th:text="${status}">오류</h1>
+    <p>요청을 처리할 수 없습니다.</p>
+    <p><a th:href="@{/}">홈으로</a></p>
+</main>
+</body>
+</html>

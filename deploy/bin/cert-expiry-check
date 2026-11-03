@@ -1,0 +1,21 @@
+#!/bin/bash
+# /usr/local/sbin/cert-expiry-check — 인증서 만료 14일 전 경고 (Spec 7.3). cron: 매일 09:00
+# 알림 채널이 정해지면 /etc/app/alert.env 에 ALERT_WEBHOOK_URL=... 을 넣는다 (Slack 호환 웹훅).
+set -euo pipefail
+CERT=/etc/letsencrypt/live/app/fullchain.pem
+DAYS=14
+if [ -f /etc/app/alert.env ]; then
+    # shellcheck disable=SC1091
+    . /etc/app/alert.env
+fi
+
+if ! openssl x509 -checkend $((DAYS * 86400)) -noout -in "$CERT" >/dev/null; then
+    end="$(openssl x509 -enddate -noout -in "$CERT" | cut -d= -f2)"
+    msg="[$(hostname)] TLS 인증서가 ${DAYS}일 안에 만료됩니다 (notAfter=${end}). certbot renew 상태를 확인하세요."
+    logger -t cert-expiry-check -p user.crit -- "$msg"
+    if [ -n "${ALERT_WEBHOOK_URL:-}" ]; then
+        payload="{\"text\":\"${msg//\"/}\"}"
+        curl -fsS --max-time 10 -H 'Content-Type: application/json' -d "$payload" "$ALERT_WEBHOOK_URL" >/dev/null || true
+    fi
+    exit 1
+fi

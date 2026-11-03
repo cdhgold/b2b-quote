@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 예외는 사유와 함께 최소한으로만 추가한다. -->
+<FindBugsFilter>
+    <!-- Spring 빈 주입 필드/생성자 인자 노출 경고: 프레임워크 관례상 오탐 -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+</FindBugsFilter>

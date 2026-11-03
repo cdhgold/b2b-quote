@@ -1,0 +1,27 @@
+# 운영. 모든 접속 정보는 systemd 가 /etc/app/secrets.env 로 주입하는 환경변수에서만 읽는다.
+spring:
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_APP_USERNAME}
+    password: ${DB_APP_PASSWORD}
+  # 앱 계정은 DML 만 가진다. 스키마 변경은 배포 시 migrate 프로파일로 별도 실행 (Spec 7.4, 7.7)
+  flyway:
+    enabled: false
+
+server:
+  address: 127.0.0.1   # Nginx 뒤에서만 접근 (Spec 7.2)
+  forward-headers-strategy: native
+  tomcat:
+    remoteip:
+      internal-proxies: 127\.0\.0\.1
+
+logging:
+  file:
+    path: /var/log/app
+  # 앱 로그 회전은 Logback 이 하루 단위로 처리 (logrotate 와 이중 회전하지 않음, Spec 7.6)
+  logback:
+    rollingpolicy:
+      file-name-pattern: "${LOG_FILE}.%d{yyyy-MM-dd}.%i.gz"
+      max-file-size: 100MB
+      max-history: 30
+      total-size-cap: 5GB

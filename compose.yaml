@@ -1,0 +1,17 @@
+# 로컬 개발용 DB. 운영 서버에서는 사용하지 않는다.
+services:
+  mariadb:
+    image: mariadb:10.11
+    environment:
+      MARIADB_DATABASE: quote_market
+      MARIADB_USER: quote_local
+      MARIADB_PASSWORD: quote_local
+      MARIADB_RANDOM_ROOT_PASSWORD: "yes"
+      TZ: Asia/Seoul
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - mariadb-data:/var/lib/mysql
+volumes:
+  mariadb-data:
